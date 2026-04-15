@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chatbot E-commerce - Projet 12</title>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f7f6; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .chat-container { width: 400px; background: white; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); overflow: hidden; display: flex; flex-direction: column; }
+        .chat-header { background: #007bff; color: white; padding: 15px; text-align: center; font-weight: bold; }
+        .chat-box { height: 400px; padding: 15px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; background-color: #fafafa; }
+        .message { padding: 10px 15px; border-radius: 20px; max-width: 80%; word-wrap: break-word; font-size: 14px; }
+        .user-msg { background: #007bff; color: white; align-self: flex-end; border-bottom-right-radius: 5px; }
+        .bot-msg { background: #e9ecef; color: black; align-self: flex-start; border-bottom-left-radius: 5px; }
+        .input-area { display: flex; padding: 15px; background: white; border-top: 1px solid #ddd; }
+        input[type="text"] { flex: 1; padding: 10px; border: 1px solid #ddd; border-radius: 20px; outline: none; }
+        button { background: #007bff; color: white; border: none; padding: 10px 15px; margin-left: 10px; border-radius: 50%; cursor: pointer; }
+        button:hover { background: #0056b3; }
+    </style>
+</head>
+<body>
+
+<div class="chat-container">
+    <div class="chat-header">Bot Commercial EMI</div>
+    <div class="chat-box" id="chat-box">
+        <div class="message bot-msg">Bonjour ! Je suis votre assistant. En quoi puis-je vous aider ?</div>
+    </div>
+    <div class="input-area">
+        <input type="text" id="user-input" placeholder="Écrivez votre message..." onkeypress="gererTouche(event)">
+        <button onclick="envoyerMessage()">➤</button>
+    </div>
+</div>
+
+<script>
+    const chatBox = document.getElementById("chat-box");
+    const inputField = document.getElementById("user-input");
+
+    function ajouterMessage(texte, expediteur) {
+        const msgDiv = document.createElement("div");
+        msgDiv.classList.add("message");
+        msgDiv.classList.add(expediteur === "user" ? "user-msg" : "bot-msg");
+        msgDiv.textContent = texte;
+        chatBox.appendChild(msgDiv);
+        chatBox.scrollTop = chatBox.scrollHeight; // Scroll automatique vers le bas
+    }
+
+    async function envoyerMessage() {
+        const texte = inputField.value.trim();
+        if (!texte) return;
+
+        // 1. Afficher le message de l'utilisateur
+        ajouterMessage(texte, "user");
+        inputField.value = "";
+
+        // 2. Envoyer le message au serveur Python (Flask)
+        try {
+            const reponseServeur = await fetch('/api/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message: texte })
+            });
+            
+            const data = await reponseServeur.json();
+            
+            // 3. Afficher la réponse du bot
+            ajouterMessage(data.reponse, "bot");
+            
+        } catch (erreur) {
+            ajouterMessage("Erreur de connexion avec le serveur.", "bot");
+        }
+    }
+
+    function gererTouche(event) {
+        if (event.key === "Enter") envoyerMessage();
+    }
+</script>
+
+</body>
+</html>
