@@ -12,10 +12,42 @@
         .message { padding: 10px 15px; border-radius: 20px; max-width: 80%; word-wrap: break-word; font-size: 14px; }
         .user-msg { background: #007bff; color: white; align-self: flex-end; border-bottom-right-radius: 5px; }
         .bot-msg { background: #e9ecef; color: black; align-self: flex-start; border-bottom-left-radius: 5px; }
-        .input-area { display: flex; padding: 15px; background: white; border-top: 1px solid #ddd; }
+        
+        /* Ajustement de la zone de saisie pour positionner le menu */
+        .input-area { display: flex; align-items: center; padding: 15px; background: white; border-top: 1px solid #ddd; position: relative; }
         input[type="text"] { flex: 1; padding: 10px; border: 1px solid #ddd; border-radius: 20px; outline: none; }
         button { background: #007bff; color: white; border: none; padding: 10px 15px; margin-left: 10px; border-radius: 50%; cursor: pointer; }
         button:hover { background: #0056b3; }
+
+        /* Styles spécifiques pour le bouton "+" et son menu d'options à la ChatGPT */
+        .menu-container { position: relative; display: flex; align-items: center; }
+        .btn-plus { margin-left: 0; margin-right: 10px; background: #6c757d; } /* Gris neutre pour le + */
+        .btn-plus:hover { background: #5a6268; }
+        
+        .options-menu { 
+            display: none; 
+            position: absolute; 
+            bottom: 55px; 
+            left: 0; 
+            background: white; 
+            border: 1px solid #ddd; 
+            border-radius: 8px; 
+            box-shadow: 0 4px 12px rgba(0,0,0,0.15); 
+            z-index: 10; 
+            width: 160px; 
+            padding: 5px 0;
+        }
+        .options-menu.active { display: block; }
+        .menu-item { 
+            padding: 10px 15px; 
+            font-size: 14px; 
+            cursor: pointer; 
+            display: flex; 
+            align-items: center; 
+            gap: 8px; 
+            color: #333;
+        }
+        .menu-item:hover { background-color: #f4f7f6; }
     </style>
 </head>
 <body>
@@ -26,6 +58,13 @@
         <div class="message bot-msg">Bonjour ! Je suis votre assistant. En quoi puis-je vous aider ?</div>
     </div>
     <div class="input-area">
+        <div class="menu-container">
+            <button class="btn-plus" onclick="toggleMenu(event)">+</button>
+            <div class="options-menu" id="options-menu">
+                <div class="menu-item" id="audio-option" onclick="gererAudio()">🎤 Message Vocal</div>
+            </div>
+        </div>
+
         <input type="text" id="user-input" placeholder="Écrivez votre message..." onkeypress="gererTouche(event)">
         <button onclick="envoyerMessage()">➤</button>
     </div>
@@ -34,6 +73,23 @@
 <script>
     const chatBox = document.getElementById("chat-box");
     const inputField = document.getElementById("user-input");
+    const optionsMenu = document.getElementById("options-menu");
+    const audioOption = document.getElementById("audio-option");
+    
+    let mediaRecorder;
+    let audioChunks = [];
+    let estEnregistrement = false;
+
+    // Toggle de l'affichage du menu "+"
+    function toggleMenu(event) {
+        event.stopPropagation();
+        optionsMenu.classList.toggle("active");
+    }
+
+    // Fermer le menu si l'utilisateur clique ailleurs sur l'écran
+    document.addEventListener("click", () => {
+        optionsMenu.classList.remove("active");
+    });
 
     function ajouterMessage(texte, expediteur) {
         const msgDiv = document.createElement("div");
@@ -41,30 +97,24 @@
         msgDiv.classList.add(expediteur === "user" ? "user-msg" : "bot-msg");
         msgDiv.textContent = texte;
         chatBox.appendChild(msgDiv);
-        chatBox.scrollTop = chatBox.scrollHeight; // Scroll automatique vers le bas
+        chatBox.scrollTop = chatBox.scrollHeight;
     }
 
     async function envoyerMessage() {
         const texte = inputField.value.trim();
         if (!texte) return;
 
-        // 1. Afficher le message de l'utilisateur
         ajouterMessage(texte, "user");
         inputField.value = "";
 
-        // 2. Envoyer le message au serveur Python (Flask)
         try {
             const reponseServeur = await fetch('/api/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ message: texte })
             });
-            
             const data = await reponseServeur.json();
-            
-            // 3. Afficher la réponse du bot
             ajouterMessage(data.reponse, "bot");
-            
         } catch (erreur) {
             ajouterMessage("Erreur de connexion avec le serveur.", "bot");
         }
@@ -72,6 +122,64 @@
 
     function gererTouche(event) {
         if (event.key === "Enter") envoyerMessage();
+    }
+
+    // --- LOGIQUE AUDIO LIÉE À L'OPTION DU MENU ---
+    async function gererAudio() {
+        if (!estEnregistrement) {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaRecorder = new MediaRecorder(stream);
+                audioChunks = [];
+
+                mediaRecorder.ondataavailable = event => {
+                    audioChunks.push(event.data);
+                };
+
+                mediaRecorder.onstop = async () => {
+                    const audioBlob = new Blob(audioChunks, { type: mediaRecorder.mimeType });
+                    await envoyerAudioAAgent2(audioBlob);
+                    stream.getTracks().forEach(track => track.stop());
+                };
+
+                mediaRecorder.start();
+                estEnregistrement = true;
+                audioOption.innerHTML = "🛑 Arrêter"; // Modifie l'élément du menu pendant l'enregistrement
+                audioOption.style.color = "#dc3545";  // Alerte visuelle rouge subtile pour l'enregistrement
+            } catch (erreur) {
+                ajouterMessage("Impossible d'accéder à votre microphone.", "bot");
+                console.error(erreur);
+            }
+        } else {
+            mediaRecorder.stop();
+            estEnregistrement = false;
+            audioOption.innerHTML = "🎤 Message Vocal";
+            audioOption.style.color = "#333";
+            optionsMenu.classList.remove("active"); // Ferme le menu une fois terminé
+        }
+    }
+
+    async function envoyerAudioAAgent2(blob) {
+        const formData = new FormData();
+        formData.append("audio", blob, "enregistrement.webm");
+
+        try {
+            const reponseServeur = await fetch('http://127.0.0.1:5001/voice-message', {
+                method: 'POST',
+                body: formData
+            });
+            const data = await reponseServeur.json();
+
+            if (data.success) {
+                ajouterMessage(data.user_message, "user");
+                ajouterMessage(data.assistant_response, "bot");
+            } else {
+                ajouterMessage("L'assistant audio a rencontré une erreur : " + data.error, "bot");
+            }
+        } catch (erreur) {
+            ajouterMessage("Erreur de communication avec l'Agent 2 (Port 5001).", "bot");
+            console.error(erreur);
+        }
     }
 </script>
 
