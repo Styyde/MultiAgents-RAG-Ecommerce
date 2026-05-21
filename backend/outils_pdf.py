@@ -4,6 +4,14 @@ from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
+from langchain.tools import tool
+from database import engine
+from sqlalchemy import text
+import json
+
+# ============================================
+# GÉNÉRATION DE DEVIS PDF
+# ============================================
 
 def generer_devis_pdf(nom_client, liste_articles):
     """
@@ -56,7 +64,7 @@ def generer_devis_pdf(nom_client, liste_articles):
 
     # --- DESIGN DU TABLEAU ---
     style_tableau = TableStyle([
-        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#004b87')), # Bleu EMI
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#004b87')),  # Bleu EMI
         ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
         ('ALIGN', (0,0), (-1,-1), 'CENTER'),
         ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
@@ -75,7 +83,119 @@ def generer_devis_pdf(nom_client, liste_articles):
     doc.build(elements)
     return chemin_complet
 
-# --- BLOC DE TEST RAPIDE ---
+
+# ============================================
+# OUTILS SQL PRÉDÉFINIS POUR L'AGENT
+# ============================================
+
+@tool
+def rechercher_produit_avec_stock(nom: str) -> str:
+    """
+    Recherche des produits dont la description contient le mot-clé (nom) et retourne leurs informations avec le stock.
+    Utilise une jointure entre T_Produits et T_Stocks.
+    """
+    with engine.connect() as conn:
+        query = text("""
+            SELECT p.id, p.description, p.prix_unitaire_ht, p.categorie, p.marque, COALESCE(s.quantite, 0) as quantite
+            FROM T_Produits p
+            LEFT JOIN T_Stocks s ON p.id = s.id_produit
+            WHERE p.description LIKE :nom
+        """)
+        result = conn.execute(query, {"nom": f"%{nom}%"}).fetchall()
+    if not result:
+        return json.dumps([])
+    produits = [dict(row._mapping) for row in result]
+    return json.dumps(produits, ensure_ascii=False)
+
+
+@tool
+def rechercher_produits_par_categorie(categorie: str) -> str:
+    """
+    Retourne tous les produits d'une catégorie donnée avec leur stock.
+    """
+    with engine.connect() as conn:
+        query = text("""
+            SELECT p.id, p.description, p.prix_unitaire_ht, p.categorie, p.marque, COALESCE(s.quantite, 0) as quantite
+            FROM T_Produits p
+            LEFT JOIN T_Stocks s ON p.id = s.id_produit
+            WHERE p.categorie = :categorie
+        """)
+        result = conn.execute(query, {"categorie": categorie}).fetchall()
+    produits = [dict(row._mapping) for row in result]
+    return json.dumps(produits, ensure_ascii=False)
+
+
+@tool
+def verifier_stock_produit(nom_produit: str) -> str:
+    """
+    Vérifie le stock disponible pour un produit spécifique (recherche par nom).
+    Retourne le nom du produit et la quantité en stock.
+    """
+    with engine.connect() as conn:
+        query = text("""
+            SELECT p.description, COALESCE(s.quantite, 0) as quantite
+            FROM T_Produits p
+            LEFT JOIN T_Stocks s ON p.id = s.id_produit
+            WHERE p.description LIKE :nom
+            LIMIT 1
+        """)
+        row = conn.execute(query, {"nom": f"%{nom_produit}%"}).fetchone()
+    if not row:
+        return json.dumps({"erreur": "Produit non trouvé"})
+    return json.dumps({"description": row.description, "quantite": row.quantite}, ensure_ascii=False)
+
+
+@tool
+def lister_categories() -> str:
+    """
+    Retourne la liste de toutes les catégories de produits disponibles.
+    """
+    with engine.connect() as conn:
+        query = text("SELECT DISTINCT categorie FROM T_Produits")
+        result = conn.execute(query).fetchall()
+    categories = [row[0] for row in result]
+    return json.dumps(categories, ensure_ascii=False)
+
+
+@tool
+def get_produits_en_rupture() -> str:
+    """
+    Retourne la liste des produits dont le stock est égal à 0 ou inférieur au seuil d'alerte.
+    """
+    with engine.connect() as conn:
+        query = text("""
+            SELECT p.description, s.quantite, s.seuil_alerte
+            FROM T_Produits p
+            JOIN T_Stocks s ON p.id = s.id_produit
+            WHERE s.quantite = 0 OR s.quantite < s.seuil_alerte
+        """)
+        result = conn.execute(query).fetchall()
+    ruptures = [{"description": row[0], "quantite": row[1], "seuil_alerte": row[2]} for row in result]
+    return json.dumps(ruptures, ensure_ascii=False)
+
+
+@tool
+def get_produits_alternatifs(categorie: str, exclure_nom: str) -> str:
+    """
+    Propose jusqu'à 3 produits alternatifs dans la même catégorie, en excluant un produit spécifique.
+    Retourne les produits avec leur prix et stock.
+    """
+    with engine.connect() as conn:
+        query = text("""
+            SELECT p.description, p.prix_unitaire_ht, COALESCE(s.quantite, 0) as quantite
+            FROM T_Produits p
+            LEFT JOIN T_Stocks s ON p.id = s.id_produit
+            WHERE p.categorie = :categorie AND p.description NOT LIKE :exclure
+            LIMIT 3
+        """)
+        result = conn.execute(query, {"categorie": categorie, "exclure": f"%{exclure_nom}%"}).fetchall()
+    alternatifs = [{"description": row[0], "prix": row[1], "quantite": row[2]} for row in result]
+    return json.dumps(alternatifs, ensure_ascii=False)
+
+
+# ============================================
+# TEST RAPIDE
+# ============================================
 if __name__ == "__main__":
     print("Test de génération de PDF...")
     articles_test = [
