@@ -1,10 +1,16 @@
 import os
+import sys
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 import re
 import hashlib
 import tempfile
 from datetime import datetime
-from flask import Flask, request, jsonify
-from flask_cors import CORS
+from fastapi import FastAPI, File, UploadFile, Body
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
 import chromadb
 from chromadb.utils import embedding_functions
 from langchain_groq import ChatGroq
@@ -15,8 +21,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-app = Flask(__name__)
-CORS(app)
+app = FastAPI(title="Agent 3 (RAG Légal)")
+
+# Configuration CORS pour FastAPI
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ============================================
 # CONFIGURATION
@@ -24,23 +38,32 @@ CORS(app)
 UPLOAD_FOLDER = "uploads/legal_documents"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-chroma_client = chromadb.HttpClient(host="localhost", port=8000)
+CHROMA_DB_PATH = os.path.join(os.path.dirname(__file__), "chroma_store")
 collection_name = "legal_documents"
 
-embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
-    model_name="paraphrase-multilingual-MiniLM-L12-v2"
-)
+try:
+    # Client embarqué (pas de serveur Chroma externe à lancer/configurer).
+    chroma_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
 
-collection = chroma_client.get_or_create_collection(
-    name=collection_name,
-    embedding_function=embedding_fn,
-    metadata={"hnsw:space": "cosine"}
-)
+    embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
+        model_name="paraphrase-multilingual-MiniLM-L12-v2"
+    )
 
-llm = ChatGroq(model="llama-3.1-8b-instant", temperature=0)
+    collection = chroma_client.get_or_create_collection(
+        name=collection_name,
+        embedding_function=embedding_fn,
+        metadata={"hnsw:space": "cosine"}
+    )
+except Exception as e:
+    # Une erreur ici ne doit pas empêcher le reste de l'app (health check, etc.) de démarrer.
+    print(f"⚠️  Impossible d'initialiser ChromaDB au démarrage: {e}")
+    collection = None
+
+llm = ChatGroq(model="openai/gpt-oss-20b", temperature=0)
+
 
 # ============================================
-# UTILITAIRES DE TRAITEMENT DE DOCUMENTS
+# UTILITAIRES DE TRAITEMENT DE DOCUMENTS (Inchangé)
 # ============================================
 class DocumentProcessor:
     @staticmethod
@@ -66,24 +89,24 @@ class DocumentProcessor:
         lines = text.split('\n')
         chunks = []
         current_chunk = []
-       
+        
         def is_title(line):
             l = line.strip()
             if len(l) < 4 or len(l) > 150:
                 return False
-           
+            
             if re.match(r'(?i)^(article|chapitre|titre|section|partie)\s+[\dIVXLC]', l):
                 return True
-           
+            
             if l.isupper() and re.search(r'[A-ZÀ-Ÿ]', l):
                 return True
-           
+            
             if re.match(r'^([\d]+\.|[IVXLC]+\.)\s+[A-ZÀ-Ÿ]', l):
                 return True
             return False
 
         has_titles = sum(1 for line in lines if is_title(line))
-       
+        
         if has_titles >= 2:
             for line in lines:
                 if is_title(line) and current_chunk:
@@ -93,7 +116,7 @@ class DocumentProcessor:
                     current_chunk.append(line)
             if current_chunk:
                 chunks.append("\n".join(current_chunk).strip())
-           
+            
             final_chunks = []
             splitter = RecursiveCharacterTextSplitter(
                 chunk_size=fallback_chunk_size,
@@ -117,20 +140,22 @@ class DocumentProcessor:
 
 processor = DocumentProcessor()
 
+
 # ============================================
 # ENDPOINTS ADMIN
 # ============================================
-@app.route('/admin/upload', methods=['POST'])
-def upload_document():
-    if 'document' not in request.files:
-        return jsonify({"error": "Aucun document fourni"}), 400
-    file = request.files['document']
-    if file.filename == '':
-        return jsonify({"error": "Fichier vide"}), 400
+@app.post('/admin/upload')
+async def upload_document(document: UploadFile = File(...)):
+    if collection is None:
+        return JSONResponse(status_code=503, content={"error": "ChromaDB indisponible"})
+    if not document.filename:
+        return JSONResponse(status_code=400, content={"error": "Fichier vide"})
 
-    suffix = os.path.splitext(file.filename)[1]
+    suffix = os.path.splitext(document.filename)[1]
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(file.read())
+        # Lecture asynchrone du flux de fichier sous FastAPI
+        content = await document.read()
+        tmp.write(content)
         tmp_path = tmp.name
 
     try:
@@ -142,14 +167,14 @@ def upload_document():
         elif ext == '.txt':
             text = processor.extract_text_from_txt(tmp_path)
         else:
-            return jsonify({"error": f"Format non supporté: {ext}"}), 400
+            return JSONResponse(status_code=400, content={"error": f"Format non supporté: {ext}"})
 
         if not text.strip():
-            return jsonify({"error": "Aucun texte extractible"}), 400
+            return JSONResponse(status_code=400, content={"error": "Aucun texte extractible"})
 
         chunks = processor.chunk_text(text)
 
-        doc_id = hashlib.md5(file.filename.encode()).hexdigest()
+        doc_id = hashlib.md5(document.filename.encode()).hexdigest()
         timestamp = datetime.now().isoformat()
 
         ids = []
@@ -160,7 +185,7 @@ def upload_document():
             ids.append(chunk_id)
             documents.append(chunk)
             metadatas.append({
-                "source": file.filename,
+                "source": document.filename,
                 "doc_id": doc_id,
                 "chunk_index": i,
                 "total_chunks": len(chunks),
@@ -168,20 +193,25 @@ def upload_document():
                 "file_type": ext[1:]
             })
 
+        # Supprime les anciens chunks du même fichier avant de ré-indexer (évite les doublons).
+        existing = collection.get(where={"doc_id": doc_id})
+        if existing['ids']:
+            collection.delete(ids=existing['ids'])
+
         collection.add(ids=ids, documents=documents, metadatas=metadatas)
 
-        return jsonify({
+        return {
             "success": True,
-            "message": f"Votre fichier « {file.filename} » a été téléchargé avec succès !",
-            "filename": file.filename
-        })
+            "message": f"Votre fichier « {document.filename} » a été téléchargé avec succès !",
+            "filename": document.filename
+        }
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return JSONResponse(status_code=500, content={"error": str(e)})
     finally:
         os.unlink(tmp_path)
 
 
-@app.route('/admin/documents', methods=['GET'])
+@app.get('/admin/documents')
 def list_documents():
     all_data = collection.get()
     unique = {}
@@ -194,29 +224,31 @@ def list_documents():
                 "total_chunks": meta['total_chunks'],
                 "file_type": meta['file_type']
             }
-    return jsonify({"documents": list(unique.values())})
+    return {"documents": list(unique.values())}
 
 
-@app.route('/admin/delete/<doc_id>', methods=['DELETE'])
-def delete_document(doc_id):
+@app.delete('/admin/delete/{doc_id}')
+def delete_document(doc_id: str):
     all_data = collection.get()
     ids_to_delete = [all_data['ids'][i] for i, meta in enumerate(all_data['metadatas']) if meta['doc_id'] == doc_id]
     
     if ids_to_delete:
         collection.delete(ids=ids_to_delete)
-    return jsonify({"success": True, "deleted_chunks": len(ids_to_delete)})
+    return {"success": True, "deleted_chunks": len(ids_to_delete)}
 
 
 # ============================================
 # SEARCH ENDPOINT
 # ============================================
-@app.route('/search', methods=['POST'])
-def search():
-    data = request.json
+@app.post('/search')
+def search(data: dict = Body(...)):
+    if collection is None:
+        return JSONResponse(status_code=503, content={"error": "ChromaDB indisponible"})
+
     question = data.get('question', '')
     top_k = data.get('top_k', 3)
     if not question:
-        return jsonify({"error": "Question vide"}), 400
+        return JSONResponse(status_code=400, content={"error": "Question vide"})
 
     results = collection.query(
         query_texts=[question],
@@ -234,26 +266,24 @@ def search():
                 "source": results['metadatas'][0][i]['source'],
                 "chunk_index": results['metadatas'][0][i]['chunk_index']
             })
-    return jsonify({"contexts": contexts})
+    return {"contexts": contexts}
 
 
 # ============================================
-# ASK ENDPOINT (Version renforcée)
+# ASK ENDPOINT (Version FastAPI)
 # ============================================
-@app.route('/ask', methods=['POST'])
-def ask():
+@app.post('/ask')
+def ask(data: dict = Body(None)):
     """Endpoint robuste pour le gateway"""
-    # 1. Récupération sécurisée des données
-    if not request.is_json:
-        return jsonify({"error": "Content-Type doit être application/json"}), 400
-    
-    data = request.get_json(silent=True)
     if data is None:
-        return jsonify({"error": "JSON invalide ou vide"}), 400
+        return JSONResponse(status_code=400, content={"error": "JSON invalide ou vide"})
 
     question = data.get('question', '').strip()
     if not question:
-        return jsonify({"error": "Le champ 'question' est obligatoire et ne doit pas être vide"}), 400
+        return JSONResponse(status_code=400, content={"error": "Le champ 'question' est obligatoire et ne doit pas être vide"})
+
+    if collection is None:
+        return JSONResponse(status_code=503, content={"error": "ChromaDB indisponible"})
 
     # 2. Recherche dans ChromaDB
     try:
@@ -263,7 +293,7 @@ def ask():
             include=["documents", "metadatas"]
         )
     except Exception as e:
-        return jsonify({"error": f"Erreur ChromaDB: {str(e)}"}), 500
+        return JSONResponse(status_code=500, content={"error": f"Erreur ChromaDB: {str(e)}"})
 
     contexts = []
     if results.get('documents') and results['documents'][0]:
@@ -273,10 +303,10 @@ def ask():
             contexts.append(f"[Document: {source} - Extrait {chunk_idx}]\n{doc}")
 
     if not contexts:
-        return jsonify({
+        return {
             "response": "Je n'ai trouvé aucune information correspondante dans les documents juridiques chargés.",
             "sources": []
-        })
+        }
 
     # 3. Prompt renforcé
     prompt = f"""
@@ -300,21 +330,25 @@ Réponse :
         response = llm.invoke(prompt)
         answer = response.content.strip()
 
-        return jsonify({
+        return {
             "response": answer,
             "sources": list(set(m.get('source', '') for m in results['metadatas'][0]))
-        })
+        }
 
     except Exception as e:
-        return jsonify({"error": f"Erreur LLM: {str(e)}"}), 500
+        return JSONResponse(status_code=500, content={"error": f"Erreur LLM: {str(e)}"})
 
-@app.route('/health', methods=['GET'])
+
+@app.get('/health')
 def health():
-    return jsonify({"status": "ok", "collection": collection_name, "count": collection.count()})
+    if collection is None:
+        return JSONResponse(status_code=503, content={"status": "chromadb_unavailable"})
+    return {"status": "ok", "collection": collection_name, "count": collection.count()}
 
 
 if __name__ == '__main__':
     print("=" * 50)
     print("📚 Agent 3 (RAG Légal) démarré sur http://localhost:5003")
     print("=" * 50)
-    app.run(debug=True, port=5003)
+    # Exécution via uvicorn sur le port 5003
+    uvicorn.run(app, host="0.0.0.0", port=5003)

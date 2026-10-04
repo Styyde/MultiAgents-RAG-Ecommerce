@@ -9,7 +9,7 @@
         .chat-container { width: 400px; background: white; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); overflow: hidden; display: flex; flex-direction: column; }
         .chat-header { background: #007bff; color: white; padding: 15px; text-align: center; font-weight: bold; }
         .chat-box { height: 400px; padding: 15px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; background-color: #fafafa; }
-        .message { padding: 10px 15px; border-radius: 20px; max-width: 80%; word-wrap: break-word; font-size: 14px; }
+        .message { padding: 10px 15px; border-radius: 20px; max-width: 80%; word-wrap: break-word; font-size: 14px; white-space: pre-line; }
         .user-msg { background: #007bff; color: white; align-self: flex-end; border-bottom-right-radius: 5px; }
         .bot-msg { background: #e9ecef; color: black; align-self: flex-start; border-bottom-left-radius: 5px; }
         
@@ -62,6 +62,7 @@
             <div class="options-menu" id="options-menu">
                 <div class="menu-item" id="audio-option" onclick="gererAudio()">🎤 Message Vocal</div>
                 <div class="menu-item" onclick="declencherUpload()">📄 Upload document (Admin)</div>
+                <div class="menu-item" onclick="nouvelleConversation()">🔄 Nouvelle conversation</div>
             </div>
         </div>
 
@@ -87,6 +88,33 @@
     // ============================================
     const GATEWAY_URL = 'http://localhost:5000';
     const AGENT3_URL = 'http://localhost:5003';  // Direct pour upload admin
+
+    // ============================================
+    // SESSION DE CONVERSATION
+    // ============================================
+    // L'identifiant est créé par la gateway au premier message puis renvoyé à chaque
+    // requête : c'est lui qui permet au bot de se souvenir des échanges précédents.
+    const SESSION_KEY = 'emi_session_id';
+    let sessionId = null;
+    try { sessionId = sessionStorage.getItem(SESSION_KEY); } catch (e) { /* stockage indisponible */ }
+
+    function memoriserSession(data) {
+        if (!data || !data.session_id || data.session_id === sessionId) return;
+        sessionId = data.session_id;
+        try { sessionStorage.setItem(SESSION_KEY, sessionId); } catch (e) { /* stockage indisponible */ }
+    }
+
+    async function nouvelleConversation() {
+        optionsMenu.classList.remove("active");
+        if (sessionId) {
+            try { await fetch(`${GATEWAY_URL}/api/session/${encodeURIComponent(sessionId)}`, { method: 'DELETE' }); }
+            catch (e) { console.error(e); }
+        }
+        sessionId = null;
+        try { sessionStorage.removeItem(SESSION_KEY); } catch (e) { /* stockage indisponible */ }
+        chatBox.innerHTML = "";
+        ajouterMessage("Nouvelle conversation. En quoi puis-je vous aider ?", "bot");
+    }
 
     // ============================================
     // FONCTIONS UI
@@ -125,10 +153,11 @@
             const reponseServeur = await fetch(`${GATEWAY_URL}/api/chat`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ message: texte })
+                body: JSON.stringify({ message: texte, session_id: sessionId })
             });
             const data = await reponseServeur.json();
-            ajouterMessage(data.reponse, "bot");
+            memoriserSession(data);
+            ajouterMessage(data.reponse || "Je n'ai pas de réponse.", "bot");
         } catch (erreur) {
             ajouterMessage("❌ Erreur de connexion avec le serveur.", "bot");
             console.error(erreur);
@@ -222,36 +251,34 @@
     }
 
     async function envoyerAudioAuGateway(audioBlob) {
-        // Afficher un message temporaire
-        ajouterMessage("🎤 Traitement de votre message vocal...", "user");
-        
-        const formData = new FormData();
-        formData.append("audio", audioBlob, "enregistrement.webm");
+    // 1. Ajout d'une bulle de "chargement" propre
+    const msgId = 'msg-' + Date.now();
+    ajouterMessage("🎤 Analyse de votre voix...", "bot");
+    const chatBoxes = document.querySelectorAll('.bot-msg');
+    const loadingBubble = chatBoxes[chatBoxes.length - 1];
+    loadingBubble.id = msgId;
 
-        try {
-            const reponseServeur = await fetch(`${GATEWAY_URL}/api/chat`, {
-                method: 'POST',
-                body: formData
-            });
-            
-            const data = await reponseServeur.json();
-            
-            // Le gateway retourne: { reponse: "...", transcribed: "..." }
-            if (data.reponse) {
-                // Afficher ce que l'utilisateur a dit (transcription)
-                if (data.transcribed) {
-                    ajouterMessage(`🎤 ${data.transcribed}`, "user");
-                }
-                // Afficher la réponse de l'assistant
-                ajouterMessage(data.reponse, "bot");
-            } else {
-                ajouterMessage("❌ Je n'ai pas compris votre message vocal.", "bot");
-            }
-        } catch (erreur) {
-            ajouterMessage("❌ Erreur de communication avec l'assistant vocal.", "bot");
-            console.error(erreur);
-        }
+    const formData = new FormData();
+    formData.append("audio", audioBlob, "audio.webm");
+    if (sessionId) formData.append("session_id", sessionId);
+
+    try {
+        const res = await fetch(`${GATEWAY_URL}/api/chat`, { method: 'POST', body: formData });
+        const data = await res.json();
+        memoriserSession(data);
+
+        // Supprimer la bulle de chargement
+        document.getElementById(msgId).remove();
+
+        // Afficher transcription + réponse
+        if (data.transcribed) ajouterMessage(`🎤 Vous avez dit : ${data.transcribed}`, "user");
+        ajouterMessage(data.reponse || "Je n'ai pas de réponse.", "bot");
+
+    } catch (e) {
+        document.getElementById(msgId).remove();
+        ajouterMessage("❌ Erreur de connexion.", "bot");
     }
+}
 </script>
 
 </body>

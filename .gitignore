@@ -4,6 +4,10 @@ venv/
 .env
 
 *.db
+*.db.bak
 
 __pycache__/
 *.pyc
+
+neo4j_data/
+backend/chroma_store/

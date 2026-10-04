@@ -1,4 +1,5 @@
 import os
+import json
 from datetime import datetime
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
@@ -7,33 +8,26 @@ from reportlab.lib import colors
 from langchain.tools import tool
 from database import engine
 from sqlalchemy import text
-import json
+from pydantic import BaseModel, Field
+from typing import List, Dict
 
 # ============================================
-# GÉNÉRATION DE DEVIS PDF
+# 1. FONCTION MÉTIER (Génération PDF pure)
 # ============================================
-
-def generer_devis_pdf(nom_client, liste_articles):
-    """
-    Génère un Devis PDF et retourne le chemin du fichier.
-    liste_articles doit être au format : [{"description": "MacBook", "quantite": 1, "prix_unitaire": 22000}]
-    """
-    # 1. Créer le dossier outputs s'il n'existe pas
+def generer_devis_pdf_metier(nom_client: str, liste_articles: list) -> str:
+    """Génère un Devis PDF physique et retourne le chemin du fichier."""
     dossier_sortie = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'outputs'))
     if not os.path.exists(dossier_sortie):
         os.makedirs(dossier_sortie)
 
-    # 2. Nommer le fichier comme demandé (DEVIS_ID_DATE.pdf)
     date_jour = datetime.now().strftime("%Y%m%d_%H%M%S")
     nom_fichier = f"DEVIS_{nom_client.replace(' ', '')}_{date_jour}.pdf"
     chemin_complet = os.path.join(dossier_sortie, nom_fichier)
 
-    # 3. Préparer le document
     doc = SimpleDocTemplate(chemin_complet, pagesize=A4)
     elements = []
     styles = getSampleStyleSheet()
 
-    # --- EN-TÊTE ---
     elements.append(Paragraph("<b>MAGASIN INFORMATIQUE EMI</b>", styles['Title']))
     elements.append(Paragraph("Devis Officiel", styles['Heading2']))
     elements.append(Spacer(1, 20))
@@ -41,58 +35,88 @@ def generer_devis_pdf(nom_client, liste_articles):
     elements.append(Paragraph(f"<b>Date :</b> {datetime.now().strftime('%d/%m/%Y')}", styles['Normal']))
     elements.append(Spacer(1, 20))
 
-    # --- LE TABLEAU DES PRODUITS ---
     donnees_tableau = [["Description", "Quantité", "Prix Unitaire HT", "Total Ligne HT"]]
     total_ht = 0
 
     for article in liste_articles:
         desc = article.get("description", "Produit Inconnu")
-        qte = article.get("quantite", 1)
-        pu = article.get("prix_unitaire", 0.0)
+        qte = int(article.get("quantite", 1))
+        pu = float(article.get("prix_unitaire", 0.0))
         ligne_ht = qte * pu
         total_ht += ligne_ht
-        
-        donnees_tableau.append([desc, str(qte), f"{pu:.2f} €", f"{ligne_ht:.2f} €"])
+        donnees_tableau.append([desc, str(qte), f"{pu:.2f} MAD", f"{ligne_ht:.2f} MAD"])
 
-    # --- CALCULS FINANCIERS (TVA 20%) ---
     tva = total_ht * 0.20
     total_ttc = total_ht + tva
 
-    donnees_tableau.append(["", "", "Sous-total HT", f"{total_ht:.2f} €"])
-    donnees_tableau.append(["", "", "TVA (20%)", f"{tva:.2f} €"])
-    donnees_tableau.append(["", "", "TOTAL TTC", f"{total_ttc:.2f} €"])
+    donnees_tableau.append(["", "", "Sous-total HT", f"{total_ht:.2f} MAD"])
+    donnees_tableau.append(["", "", "TVA (20%)", f"{tva:.2f} MAD"])
+    donnees_tableau.append(["", "", "TOTAL TTC", f"{total_ttc:.2f} MAD"])
 
-    # --- DESIGN DU TABLEAU ---
-    style_tableau = TableStyle([
-        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#004b87')),  # Bleu EMI
+    t = Table(donnees_tableau)
+    t.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#004b87')),
         ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
         ('ALIGN', (0,0), (-1,-1), 'CENTER'),
-        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
         ('BOTTOMPADDING', (0,0), (-1,0), 12),
         ('GRID', (0,0), (-1,-1), 1, colors.black),
-        # Lignes de totaux en gras
-        ('FONTNAME', (2,-3), (-1,-1), 'Helvetica-Bold'),
-        ('BACKGROUND', (2,-1), (-1,-1), colors.lightgrey),
-    ])
-    
-    t = Table(donnees_tableau)
-    t.setStyle(style_tableau)
+    ]))
     elements.append(t)
-
-    # --- GÉNÉRATION ---
     doc.build(elements)
+    
     return chemin_complet
 
 
+
 # ============================================
-# OUTILS SQL PRÉDÉFINIS POUR L'AGENT
+# 2. WRAPPER POUR IMPORT DANS sqltools.py
+# ============================================
+def generer_devis_pdf(nom_client: str, liste_articles: list) -> str:
+    return generer_devis_pdf_metier(nom_client, liste_articles)
+
+
+# ============================================
+# 3. OUTIL LANGCHAIN POUR L'AGENT
+# ============================================
+class DevisSchema(BaseModel):
+    nom_client: str = Field(
+        description="Nom complet du client (ex: 'Younes Snihji'). Ne doit pas être vide."
+    )
+    liste_articles: List[Dict] = Field(
+        description="Liste d'objets. Chaque objet DOIT contenir exactement: 'description' (str), 'quantite' (int) et 'prix_unitaire' (float). Exemple: [{'description': 'MacBook Pro', 'quantite': 1, 'prix_unitaire': 22000}]"
+    )
+
+
+@tool(args_schema=DevisSchema)
+def creer_devis_pdf_tool(nom_client: str, liste_articles: List[Dict]) -> str:
+    """
+    [OUTIL DE GÉNÉRATION DE DEVIS OFFICIEL]
+    À utiliser UNIQUEMENT lorsque le client valide explicitement sa commande ou demande formellement un devis écrit en PDF.
+    Prend le nom du client et la liste complète des articles validés avec leurs quantités et prix unitaires HT.
+    """
+    try:
+        chemin_pdf = generer_devis_pdf_metier(nom_client, liste_articles)
+        return json.dumps({
+            "statut": "Succès",
+            "message": f"Le devis PDF a été généré avec succès pour {nom_client}.",
+            "chemin_fichier": chemin_pdf
+        }, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({
+            "statut": "Erreur",
+            "message": f"Échec de la génération du devis : {str(e)}"
+        }, ensure_ascii=False)
+
+
+# ============================================
+# 4. OUTILS SQL
 # ============================================
 
 @tool
 def rechercher_produit_avec_stock(nom: str) -> str:
     """
-    Recherche des produits dont la description contient le mot-clé (nom) et retourne leurs informations avec le stock.
-    Utilise une jointure entre T_Produits et T_Stocks.
+    [OUTIL PRINCIPAL DE RECHERCHE DE PRODUIT]
+    À utiliser en premier choix pour toute recherche de produit spécifique.
     """
     with engine.connect() as conn:
         query = text("""
@@ -111,7 +135,9 @@ def rechercher_produit_avec_stock(nom: str) -> str:
 @tool
 def rechercher_produits_par_categorie(categorie: str) -> str:
     """
-    Retourne tous les produits d'une catégorie donnée avec leur stock.
+    [OUTIL DE RECHERCHE PAR CATÉGORIE]
+    À utiliser UNIQUEMENT pour une demande de gamme générale.
+    Catégories valides: 'Ordinateur', 'Accessoire', 'Ecran', 'Smartphone', 'Audio', 'Stockage'
     """
     with engine.connect() as conn:
         query = text("""
@@ -128,8 +154,8 @@ def rechercher_produits_par_categorie(categorie: str) -> str:
 @tool
 def verifier_stock_produit(nom_produit: str) -> str:
     """
-    Vérifie le stock disponible pour un produit spécifique (recherche par nom).
-    Retourne le nom du produit et la quantité en stock.
+    [OUTIL DE VÉRIFICATION DE STOCK]
+    Vérifie la quantité disponible d'un produit spécifique.
     """
     with engine.connect() as conn:
         query = text("""
@@ -148,7 +174,8 @@ def verifier_stock_produit(nom_produit: str) -> str:
 @tool
 def lister_categories() -> str:
     """
-    Retourne la liste de toutes les catégories de produits disponibles.
+    [OUTIL LISTE DES CATÉGORIES]
+    Retourne toutes les catégories disponibles.
     """
     with engine.connect() as conn:
         query = text("SELECT DISTINCT categorie FROM T_Produits")
@@ -160,7 +187,8 @@ def lister_categories() -> str:
 @tool
 def get_produits_en_rupture() -> str:
     """
-    Retourne la liste des produits dont le stock est égal à 0 ou inférieur au seuil d'alerte.
+    [OUTIL PRODUITS EN RUPTURE]
+    Liste les produits avec stock critique ou nul.
     """
     with engine.connect() as conn:
         query = text("""
@@ -177,8 +205,8 @@ def get_produits_en_rupture() -> str:
 @tool
 def get_produits_alternatifs(categorie: str, exclure_nom: str) -> str:
     """
-    Propose jusqu'à 3 produits alternatifs dans la même catégorie, en excluant un produit spécifique.
-    Retourne les produits avec leur prix et stock.
+    [OUTIL PRODUITS ALTERNATIFS]
+    Propose jusqu'à 3 produits alternatifs dans la même catégorie.
     """
     with engine.connect() as conn:
         query = text("""
@@ -194,7 +222,7 @@ def get_produits_alternatifs(categorie: str, exclure_nom: str) -> str:
 
 
 # ============================================
-# TEST RAPIDE
+# 5. TEST
 # ============================================
 if __name__ == "__main__":
     print("Test de génération de PDF...")
@@ -202,5 +230,5 @@ if __name__ == "__main__":
         {"description": "MacBook Pro M3", "quantite": 1, "prix_unitaire": 22000},
         {"description": "Souris Sans Fil Logitech", "quantite": 2, "prix_unitaire": 1200}
     ]
-    chemin = generer_devis_pdf("Younes Snihji", articles_test)
+    chemin = generer_devis_pdf_metier("Younes Snihji", articles_test)
     print(f"✅ Succès ! PDF généré ici : {chemin}")

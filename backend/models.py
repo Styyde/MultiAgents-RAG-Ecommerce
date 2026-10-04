@@ -9,6 +9,7 @@ class Produit(Base):
     __tablename__ = 'T_Produits'
 
     id = Column(Integer, primary_key=True)
+    sku = Column(String, unique=True, nullable=False, index=True)
     description = Column(String, nullable=False)
     prix_unitaire_ht = Column(Float, nullable=False)
     categorie = Column(String)
